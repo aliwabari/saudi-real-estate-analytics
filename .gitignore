@@ -1,0 +1,45 @@
+# Local source datasets: never publish raw data.
+/data/raw/
+*.csv
+*.xlsx
+*.xls
+*.xlsb
+*.parquet
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments, caches, and generated output
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
+logs/
+*.log
+
+# Power BI local state and temporary files
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+**/.pbi/unappliedChanges.json
+**/.pbi/editorSettings.json
+*.pbix.autosave
+*.pbix.lock
+*.tmp
+~$*
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

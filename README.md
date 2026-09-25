@@ -4,7 +4,7 @@ A Peak portfolio project to build an end-to-end analysis of Saudi real estate sa
 
 ## Current status
 
-Project structure and initial documentation only. Ingestion, database implementation, analysis, and dashboards have not been built yet.
+Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) have been loaded locally into SQL Server with source tracking and file-level duplicate protection. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
 
 ## Planned data flow
 
@@ -43,16 +43,16 @@ Region has many cities; each city belongs to one region. City has many neighborh
 
 ```text
 data/raw/              Existing local datasets; excluded from Git
-src/ingestion/         Future file discovery, mapping, loading, validation
+src/ingestion/         File discovery, mapping, validation, loading, and tests
 src/transformation/    Reserved for later Python transformations if needed
-sql/raw/               Future staging definitions and checks
+sql/raw/               Staging definitions, ingestion metadata, and checks
 sql/core/              Future agreed relational model and normalization
 notebooks/             Future exploration and profiling
 powerbi/               Future Power BI report/project files
 docs/                  Source inventory and technical decisions
-requirements.txt       Dependencies added as implementation is agreed
+requirements.txt       Pinned Python dependency for SQL Server access
 ```
 
-Empty development folders use `.gitkeep` placeholders because Git tracks files rather than empty directories. No Python dependencies have been selected yet.
+Empty development folders use `.gitkeep` placeholders because Git tracks files rather than empty directories. Python uses a local `.venv` and the dependency declared in `requirements.txt`; environments, raw datasets, and ingestion logs are excluded from Git.
 
 See [the source inventory](docs/source-inventory.md) for observed coverage and header differences. Work proceeds one major step at a time, with database designs proposed and reviewed before implementation.

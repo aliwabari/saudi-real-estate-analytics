@@ -39,13 +39,23 @@ Confirmed geography design:
 
 Region has many cities; each city belongs to one region. City has many neighborhoods; each neighborhood belongs to one city. The remainder of the ERD is not finalized.
 
+## SQL files
+
+Run these in order only when setting up a new database:
+
+1. `sql/00_create_database.sql`: create the database and the raw/core schemas if missing.
+2. `sql/raw/01_create_raw_tables.sql`: create the two raw tables if missing.
+3. `sql/raw/DisplayRawtables.sql`: view 10 sample rows and the total count for each table.
+
+The files include short Arabic explanations. The current database is already populated. Simplifying these files did not remove existing data or the earlier tracking columns/table from SQL Server. No core tables have been designed or implemented here.
+
 ## Project structure
 
 ```text
 data/raw/              Existing local datasets; excluded from Git
 src/ingestion/         Simple loader and learning scripts
 src/transformation/    Reserved for later Python transformations if needed
-sql/raw/               Staging definitions, ingestion metadata, and checks
+sql/raw/               Raw table definitions and simple display/count queries
 sql/core/              Future agreed relational model and normalization
 notebooks/             Future exploration and profiling
 powerbi/               Future Power BI report/project files

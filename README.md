@@ -4,7 +4,7 @@ A Peak portfolio project to build an end-to-end analysis of Saudi real estate sa
 
 ## Current status
 
-Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) were loaded locally into SQL Server by the earlier loader. The current ingestion script is a simpler, one-file implementation for reading CSVs, mapping columns, converting values, inserting rows, and printing counts. It stops if either destination table already contains data. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
+Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) were loaded locally into SQL Server by the earlier loader. The current ingestion script uses pandas in one readable file for reading CSVs, mapping columns, converting values, inserting rows, and printing counts. It stops if either destination table already contains data. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
 
 ## Planned data flow
 
@@ -60,9 +60,9 @@ sql/core/              Future agreed relational model and normalization
 notebooks/             Future exploration and profiling
 powerbi/               Future Power BI report/project files
 docs/                  Source inventory and technical decisions
-requirements.txt       Pinned Python dependency for SQL Server access
+requirements.txt       Pinned pandas, NumPy, and pyodbc dependencies
 ```
 
-Empty development folders use `.gitkeep` placeholders because Git tracks files rather than empty directories. Python uses a local `.venv` and the dependency declared in `requirements.txt`; environments, raw datasets, and ingestion logs are excluded from Git.
+Empty development folders use `.gitkeep` placeholders because Git tracks files rather than empty directories. Python uses a local `.venv` and the dependencies declared in `requirements.txt`; environments, raw datasets, and ingestion logs are excluded from Git.
 
 See [the source inventory](docs/source-inventory.md) for observed coverage and header differences. Work proceeds one major step at a time, with database designs proposed and reviewed before implementation.

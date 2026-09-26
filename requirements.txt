@@ -1,2 +1,5 @@
-# SQL Server connection through the installed ODBC driver.
+# CSV preparation and SQL Server connection.
+pandas==3.0.6
+# NumPy is required by pandas; no direct NumPy code is needed here.
+numpy==2.5.3
 pyodbc==5.3.0

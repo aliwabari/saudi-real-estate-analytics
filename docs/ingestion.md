@@ -1,42 +1,61 @@
-# Simple CSV ingestion
+# CSV ingestion with pandas
 
-Everything is in `src/ingestion/load_raw.py`. Read it from top to bottom:
+The main script is `src/ingestion/load_raw.py`. It follows five steps: find CSVs, read them, map columns, convert values, and insert rows with a printed count.
 
-1. **FOLDERS** names the two CSV folders.
-2. **SALES_MAP / RENTAL_MAP** connect source headers to SQL column names.
-3. **convert_value()** converts strings into integers, decimals, dates, or NULL.
-4. **read_file()** reads one CSV and puts its values in SQL column order.
-5. **main()** loops over the files, inserts rows, and prints counts.
+## Read the code in this order
 
-## Run it
+1. **FOLDERS / MAPPINGS / COLUMNS**: source folders, header names, and SQL column order.
+2. **read_file()**: returns one prepared pandas DataFrame.
+3. **to_decimal()**: the small helper used for exact decimal conversion and two-place rounding.
+4. **main()**: loops over files, optionally inserts the DataFrame rows, and prints counts.
 
-From the project folder, read and convert all CSVs without connecting to SQL Server:
+Inside `read_file()`, the main pandas operations are:
+
+| Operation | Purpose |
+|---|---|
+| `pd.read_csv(..., dtype=str, keep_default_na=False)` | Read text without losing reference-number leading zeros or interpreting literal text such as NA as missing |
+| `df.columns.str.strip()` | Remove spaces around header names |
+| `df.rename(columns=...)` | Map source names to SQL names |
+| `df.replace(...).dropna(how="all")` | Mark blank cells as missing and skip completely empty records |
+| `df[COLUMNS[table]]` | Select and order the original business columns |
+| `pd.to_numeric(...).astype("Int64")` | Convert count/year/quarter columns, allowing missing values |
+| `Series.map(to_decimal)` | Convert prices, areas, and averages using Decimal |
+| `pd.to_datetime(...).dt.date` | Convert the source date format explicitly |
+| `df.astype(object).where(pd.notna(df), None)` | Prepare missing values as Python None for SQL NULL |
+| `df.itertuples(index=False, name=None)` | Pass ordinary row values to pyodbc, excluding the DataFrame index |
+
+Pandas prepares the data; pyodbc sends parameterized INSERT statements. Decimal preserves the previous exact rounding rule for DECIMAL(18,2). NumPy is installed as a pandas dependency; no direct NumPy calls make this script simpler. Path remains the tool for discovering files.
+
+## Run from the project folder
+
+Install dependencies: `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`
+
+Read and convert all files, without opening a database connection:
 
 ```powershell
 .\.venv\Scripts\python.exe .\src\ingestion\load_raw.py
 ```
 
-For a first load into **empty** raw tables:
+For a first load into empty raw tables:
 
 ```powershell
 .\.venv\Scripts\python.exe .\src\ingestion\load_raw.py --load
 ```
 
-Your data is already loaded. The second command will stop before inserting anything because the tables contain data. This script does not clear tables or automatically resume a partial load. If a file fails after earlier files committed, review that partial load before trying again.
+Your data is already loaded. The load command stops if either raw table contains data. This is a one-time loader, not an incremental system. Each successfully inserted file is committed; a failure rolls back the current file. Earlier committed files remain, so a partial load needs review before retrying.
 
-## The few source-specific rules
+## Other Python files
 
-- Headers have surrounding spaces removed; Arabic and English rental headers are supported.
-- Numbers such as `1,234.50` become Decimal values. SQL DECIMAL(18,2) requires rounding to two places; the original precision remains in the CSV.
-- Standard sales dates use year/month/day. The known 2023 Q1 file uses month/day/year and has no HijriDate, so that column receives NULL.
-- Empty cells become NULL. Completely empty records are skipped.
-- Text stays as supplied. Dates are not changed to match filenames: the 2025 Q2 sales file actually contains April–June 2024 dates.
-- Only the original ten sales columns and seven rental columns are inserted. Extra CSV columns remain in the unchanged source files; the simplified loader does not copy them to SQL JSON.
+- `preview_sales.py`: pandas reads five rows from the first sales file and displays the headers and `df.head()`.
+- `discover_files.py`: Path lists all source filenames; pandas is unnecessary for this task.
+- `test_connection.py`: pyodbc tests SQL connectivity; pandas is unnecessary for this task.
 
-The connection uses Windows Authentication to the local SQL Server. `?` placeholders pass values separately from SQL text. `executemany()` inserts the rows from one file; `commit()` saves them. If insertion fails, `rollback()` undoes the current file. Reading one file at a time keeps the code straightforward; ordinary executemany is slower than the previous optimized loader.
+## Source rules and existing data
 
-## Existing database and earlier code
+The known 2023 Q1 sales file uses month/day/year and lacks HijriDate; other sales dates use year/month/day. Text is preserved. Only the original ten sales and seven rental columns are selected; extra fields remain in the unchanged CSV files. Decimal values are rounded to two places for the existing SQL types. Invalid numbers/dates raise errors rather than silently becoming NULL.
 
-The completed load of 1,269,500 sales rows and 17,792 rental rows is unchanged. Existing tracking columns, file ledger, and preserved JSON values remain in SQL Server. This simplified script does not use or maintain them.
+The 2025 Q2 sales file contains April–June 2024 dates; the script preserves them. The existing 1,269,500 sales and 17,792 rental rows were not reloaded during this refactor. Previous SQL tracking columns/table and JSON values remain in the database and are not used by the simplified loader.
 
-For a new SQL Server setup, run `sql/00_create_database.sql`, then `sql/raw/01_create_raw_tables.sql`. These create the database, raw/core schemas, and the two raw tables only when missing. Your database is already set up. Use `sql/raw/DisplayRawtables.sql` to view small samples and row counts. Python does not execute these SQL files automatically. The previous tracking scripts are available in Git history; `docs/ingestion-validation.md` records the earlier completed load.
+For a new database, run `sql/00_create_database.sql`, then `sql/raw/01_create_raw_tables.sql`. `sql/raw/DisplayRawtables.sql` shows samples and row counts. Python does not run these SQL files automatically.
+
+Pandas references: [read_csv](https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html), [to_numeric](https://pandas.pydata.org/docs/reference/api/pandas.to_numeric.html), [to_datetime](https://pandas.pydata.org/docs/reference/api/pandas.to_datetime.html).

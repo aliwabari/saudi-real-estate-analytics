@@ -1,11 +1,10 @@
 """Read sales/rental CSVs. Add --load only when both raw tables are empty."""
 
 import argparse
-import csv
-from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
+import pandas as pd
 import pyodbc
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -46,56 +45,53 @@ COLUMNS = {
 }
 
 
-def convert_value(column, value, date_format):
-    """3. Convert CSV strings into the types expected by SQL Server."""
-    if not value.strip():
-        return None
-    if column in ("Year", "Quarter", "PropertyCount", "TotalDeals"):
-        number = Decimal(value.replace(",", ""))
-        if number != number.to_integral_value():
-            raise ValueError(f"{column} must be a whole number: {value}")
-        return int(number)
-    if column in ("Price", "Area", "AverageValue"):
-        number = Decimal(value.replace(",", ""))
-        return number.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if column == "GregorianDate":
-        return datetime.strptime(value.strip(), date_format).date()
-    return value  # Keep text, including transaction-reference leading zeros.
+def to_decimal(value):
+    """نستخدم Decimal للأسعار والمساحات حتى نحافظ على دقة التحويل والتقريب."""
+    return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def read_file(path, table):
-    """Read one file and return rows in the same order as the SQL columns."""
-    rows = []
-    with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file, strict=True)
-        if not reader.fieldnames:
-            raise ValueError(f"{path.name}: missing headers")
-        reader.fieldnames = [header.strip() for header in reader.fieldnames]
-        mapping = MAPPINGS[table]
-        mapped_headers = [mapping[h] for h in reader.fieldnames if h in mapping]
-        if len(reader.fieldnames) != len(set(reader.fieldnames)) or len(mapped_headers) != len(set(mapped_headers)):
-            raise ValueError(f"{path.name}: duplicate column mapping")
-        # Only the known 2023 Q1 layout lacks HijriDate and uses month/day/year.
-        special_date = table == "MOJ_Sales" and path.name == "MOJ-Sales-2023-Q1.csv"
+    """قراءة CSV وتجهيز أعمدته داخل DataFrame واحد."""
+    # نقرأ القيم كنصوص حتى لا نفقد الأصفار في بداية الرقم المرجعي.
+    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
+
+    # إزالة المسافات حول أسماء الأعمدة، ثم تحويلها إلى أسماء SQL.
+    df.columns = df.columns.str.strip()
+    df = df.rename(columns=MAPPINGS[table])
+    if not df.columns.is_unique:
+        raise ValueError(f"{path.name}: duplicate column mapping")
+
+    # الخلايا الفارغة تصبح قيمًا مفقودة؛ نتجاوز الصف الفارغ بالكامل فقط.
+    df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all")
+
+    # ملف 2023 Q1 يستخدم شهر/يوم/سنة ولا يحتوي على التاريخ الهجري.
+    special_date = table == "MOJ_Sales" and path.name == "MOJ-Sales-2023-Q1.csv"
+    if special_date and "HijriDate" not in df.columns:
+        df["HijriDate"] = pd.NA
+
+    # اختيار الأعمدة المطلوبة وترتيبها حسب جدول SQL؛ العمود الناقص يسبب خطأ.
+    df = df[COLUMNS[table]].copy()
+
+    # تحويل أعمدة الأعداد الصحيحة. Int64 يسمح أيضًا بالقيم المفقودة.
+    for column in ("Year", "Quarter", "PropertyCount", "TotalDeals"):
+        if column in df.columns:
+            values = df[column].str.replace(",", "", regex=False)
+            df[column] = pd.to_numeric(values, errors="raise").astype("Int64")
+
+    # تطبيق نفس التحويل على عمود كامل بدل المرور يدويًا على كل صف.
+    for column in ("Price", "Area", "AverageValue"):
+        if column in df.columns:
+            values = df[column].str.replace(",", "", regex=False)
+            df[column] = values.map(to_decimal, na_action="ignore")
+
+    if table == "MOJ_Sales":
         date_format = "%m/%d/%Y" if special_date else "%Y/%m/%d"
-        required = set(COLUMNS[table]) - ({"HijriDate"} if special_date else set())
-        if not required.issubset(mapped_headers):
-            raise ValueError(f"{path.name}: missing expected columns")
-        for record_number, source_row in enumerate(reader, start=2):
-            try:
-                if None in source_row or None in source_row.values():
-                    raise ValueError("row has the wrong number of fields")
-                if not any(value.strip() for value in source_row.values()):
-                    continue  # Ignore completely empty records.
-                row = dict.fromkeys(COLUMNS[table])
-                for header, value in source_row.items():
-                    if header in mapping:
-                        column = mapping[header]
-                        row[column] = convert_value(column, value, date_format)
-                rows.append(tuple(row[column] for column in COLUMNS[table]))
-            except (ValueError, ArithmeticError) as error:
-                raise ValueError(f"{path.name}, record {record_number}: {error}") from error
-    return rows
+        df["GregorianDate"] = pd.to_datetime(
+            df["GregorianDate"].str.strip(), format=date_format, errors="raise"
+        ).dt.date
+
+    # pyodbc يحتاج None للقيم التي ستدخل إلى SQL بوصفها NULL.
+    return df.astype(object).where(pd.notna(df), None)
 
 
 def main():
@@ -125,18 +121,20 @@ def main():
                 raise ValueError(f"No CSV files found in {folder}")
             total = 0
             for path in files:
-                rows = read_file(path, table)
+                df = read_file(path, table)
                 # 4. Insert using parameters: each ? receives one column value.
-                if load and rows:
+                if load and not df.empty:
                     columns = ", ".join(f"[{column}]" for column in COLUMNS[table])
                     placeholders = ", ".join("?" for column in COLUMNS[table])
                     sql = f"INSERT INTO raw.[{table}] ({columns}) VALUES ({placeholders})"
+                    # تحويل صفوف DataFrame إلى قيم يرسلها pyodbc إلى SQL.
+                    rows = list(df.itertuples(index=False, name=None))
                     cursor.executemany(sql, rows)
                     connection.commit()  # Save this file only after every row succeeds.
                 # 5. Report the count for each file and the whole table.
                 action = "Inserted" if load else "Read"
-                print(f"{action} {len(rows):,} rows: {path.name}", flush=True)
-                total += len(rows)
+                print(f"{action} {len(df):,} rows: {path.name}", flush=True)
+                total += len(df)
             print(f"{table}: {len(files)} files, {total:,} rows\n")
     finally:
         if connection is not None:

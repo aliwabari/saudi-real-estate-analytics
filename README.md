@@ -4,13 +4,13 @@ A Peak portfolio project to build an end-to-end analysis of Saudi real estate sa
 
 ## Current status
 
-Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) have been loaded locally into SQL Server with source tracking and file-level duplicate protection. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
+Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) were loaded locally into SQL Server by the earlier loader. The current ingestion script is a simpler, one-file implementation for reading CSVs, mapping columns, converting values, inserting rows, and printing counts. It stops if either destination table already contains data. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
 
 ## Planned data flow
 
 CSV files → Python ingestion → SQL Server raw schema → SQL cleaning and normalization → core relational model → analytical/star model → Power BI.
 
-Python will discover source files, standardize column names, handle structural differences, load raw tables, log loaded files, and validate row counts and errors. Heavy analytical cleaning belongs after raw ingestion.
+Python discovers source files, maps their columns, converts dates and numbers, inserts rows into raw tables, and prints row counts. Heavy analytical cleaning belongs after raw ingestion.
 
 ## Sources and grain
 
@@ -43,7 +43,7 @@ Region has many cities; each city belongs to one region. City has many neighborh
 
 ```text
 data/raw/              Existing local datasets; excluded from Git
-src/ingestion/         File discovery, mapping, validation, loading, and tests
+src/ingestion/         Simple loader and learning scripts
 src/transformation/    Reserved for later Python transformations if needed
 sql/raw/               Staging definitions, ingestion metadata, and checks
 sql/core/              Future agreed relational model and normalization

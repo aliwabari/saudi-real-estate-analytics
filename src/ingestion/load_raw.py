@@ -1,260 +1,148 @@
-"""Validate or load all MOJ sales and REGA rental files. Default: validate only."""
+"""Read sales/rental CSVs. Add --load only when both raw tables are empty."""
 
 import argparse
-import json
-import logging
-import os
-import re
-import sys
-from contextlib import closing
-from datetime import datetime, timezone
+import csv
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import pyodbc
 
-from source_formats import COLUMNS, DECIMAL_COLUMNS, INTEGER_COLUMNS, TEXT_LENGTHS
-from source_formats import discover, file_hash, inspect_file, read_rows
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RAW_FOLDER = PROJECT_ROOT / "data" / "raw"
 
-ROOT = Path(__file__).resolve().parents[2]
-VERSION = "1.0.0"
+# 1. Find the CSV files in these two folders.
+FOLDERS = {
+    "MOJ_Sales": "MOJ Real Estate Sales Transactions (2020–2026 Q1)",
+    "REGA_Rentals": "REGA Rental Market Indicators (2019–2024)",
+}
 
-
-def connect():
-    # A connection string may be supplied by the environment; never log it.
-    value = os.environ.get("PEAK_SQL_CONNECTION_STRING")
-    if not value:
-        value = (
-            "DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost;"
-            "DATABASE=SaudiRealEstateAnalytics;Trusted_Connection=yes;"
-            "Encrypt=yes;TrustServerCertificate=yes;"
-        )
-    return pyodbc.connect(value, timeout=10)
-
-
-def acquire_lock(connection):
-    result = connection.execute("""
-        SET NOCOUNT ON;
-        DECLARE @result int;
-        EXEC @result = sys.sp_getapplock @Resource=N'PeakRawIngestion',
-             @LockMode='Exclusive', @LockOwner='Session', @LockTimeout=0;
-        SELECT @result;
-    """).fetchval()
-    if result < 0:
-        raise RuntimeError("Another ingestion process is running")
-    connection.commit()
-
-
-def check_schema(connection):
-    """Fail rather than allowing SQL Server to truncate or silently change types."""
-    for target, columns in COLUMNS.items():
-        actual = {r[0]: tuple(r[1:]) for r in connection.execute("""
-            SELECT c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable
-            FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id
-            WHERE c.object_id=OBJECT_ID(?)
-        """, f"raw.{target}")}
-        for column in columns:
-            if column in TEXT_LENGTHS:
-                expected = ("nvarchar", TEXT_LENGTHS[column] * 2, 0, 0, True)
-            elif column in INTEGER_COLUMNS:
-                expected = ("int", 4, 10, 0, True)
-            elif column in DECIMAL_COLUMNS:
-                expected = ("decimal", 9, 18, 2, True)
-            else:
-                expected = ("date", 3, 10, 0, True)
-            if actual.get(column) != expected:
-                raise RuntimeError(f"Schema mismatch for raw.{target}.{column}: {actual.get(column)}")
-        if "IngestionFileID" not in actual:
-            if connection.execute(f"SELECT COUNT_BIG(*) FROM raw.[{target}]").fetchval():
-                raise RuntimeError(f"raw.{target} contains untracked rows; manual review required")
+# 2. Map each source header to its SQL column name.
+SALES_MAP = {
+    "المنطقة": "Region", "المدينة": "City",
+    "المدينة / الحي": "Neighborhood", "الحي": "Neighborhood",
+    "الرقم المرجعي للصفقة": "TransactionReference", "رقم مرجعي": "TransactionReference",
+    "تاريخ الصفقة ميلادي": "GregorianDate", "التاريخ": "GregorianDate",
+    "تاريخ الصفقة هجري": "HijriDate", "تصنيف العقار": "PropertyClassification",
+    "عدد العقارات": "PropertyCount", "السعر": "Price",
+    "السعر بالريال السعودي": "Price", "المساحة": "Area",
+}
+RENTAL_MAP = {
+    "السنة": "Year", "year": "Year",
+    "الربع": "Quarter", "quarter": "Quarter",
+    "المنطقة": "Region", "region_ar": "Region",
+    "المدينة": "City", "city_ar": "City",
+    "نوع العقار": "PropertyType", "Category": "PropertyType",
+    "مجموع الصفقات": "TotalDeals", "total_deals": "TotalDeals",
+    "المتوسط": "AverageValue", "average": "AverageValue",
+}
+MAPPINGS = {"MOJ_Sales": SALES_MAP, "REGA_Rentals": RENTAL_MAP}
+COLUMNS = {
+    "MOJ_Sales": ["Region", "City", "Neighborhood", "TransactionReference",
+                  "GregorianDate", "HijriDate", "PropertyClassification",
+                  "PropertyCount", "Price", "Area"],
+    "REGA_Rentals": ["Year", "Quarter", "Region", "City", "PropertyType",
+                     "TotalDeals", "AverageValue"],
+}
 
 
-def prepare_tracking(connection):
-    sql = (ROOT / "sql/raw/02_ingestion_tracking.sql").read_text(encoding="utf-8")
-    for batch in re.split(r"(?im)^GO\s*$", sql):
-        if batch.strip():
-            connection.execute(batch)
-    connection.commit()
+def convert_value(column, value, date_format):
+    """3. Convert CSV strings into the types expected by SQL Server."""
+    if not value.strip():
+        return None
+    if column in ("Year", "Quarter", "PropertyCount", "TotalDeals"):
+        number = Decimal(value.replace(",", ""))
+        if number != number.to_integral_value():
+            raise ValueError(f"{column} must be a whole number: {value}")
+        return int(number)
+    if column in ("Price", "Area", "AverageValue"):
+        number = Decimal(value.replace(",", ""))
+        return number.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if column == "GregorianDate":
+        return datetime.strptime(value.strip(), date_format).date()
+    return value  # Keep text, including transaction-reference leading zeros.
 
 
-def reconcile(connection):
-    """Detect manual deletes or inserts before trusting the file ledger."""
-    for target in COLUMNS:
-        if connection.execute(
-            f"SELECT COUNT_BIG(*) FROM raw.[{target}] WHERE IngestionFileID IS NULL OR SourceRowNumber IS NULL OPTION (MAXDOP 1)"
-        ).fetchval():
-            raise RuntimeError(f"Untracked rows exist in raw.{target}; refusing to append")
-        mismatches = connection.execute(f"""
-            SELECT f.IngestionFileID FROM raw.IngestionFiles f
-            LEFT JOIN (SELECT IngestionFileID, COUNT_BIG(*) AS n FROM raw.[{target}]
-                       WHERE IngestionFileID IS NOT NULL
-                       GROUP BY IngestionFileID) r ON r.IngestionFileID=f.IngestionFileID
-            WHERE f.TargetTable=? AND f.LoadedRows<>COALESCE(r.n,0)
-            OPTION (MAXDOP 1)
-        """, target).fetchall()
-        if mismatches:
-            raise RuntimeError(f"File ledger and row counts disagree for raw.{target}")
-
-
-def already_loaded(connection, target, relative, digest):
-    row = connection.execute(
-        "SELECT FileSHA256 FROM raw.IngestionFiles WHERE TargetTable=? AND SourcePath=?",
-        target, relative,
-    ).fetchone()
-    if row:
-        if row[0] != digest:
-            raise RuntimeError(f"Previously loaded file changed: {relative}. Review before reloading.")
-        return True
-    return connection.execute(
-        "SELECT IngestionFileID FROM raw.IngestionFiles WHERE TargetTable=? AND FileSHA256=?",
-        target, digest,
-    ).fetchone() is not None
-
-
-def input_sizes(target):
-    sizes = []
-    for column in COLUMNS[target]:
-        if column in TEXT_LENGTHS:
-            sizes.append((pyodbc.SQL_WVARCHAR, TEXT_LENGTHS[column], 0))
-        elif column in INTEGER_COLUMNS:
-            sizes.append((pyodbc.SQL_INTEGER, 0, 0))
-        elif column in DECIMAL_COLUMNS:
-            sizes.append((pyodbc.SQL_DECIMAL, 18, 2))
-        else:
-            sizes.append((pyodbc.SQL_TYPE_DATE, 0, 0))
-    return sizes + [(pyodbc.SQL_BIGINT, 0, 0), (pyodbc.SQL_INTEGER, 0, 0)]
-
-
-def insert_file(connection, target, path, stats, batch_size):
-    """Rows and successful-file ledger commit together, or both roll back."""
-    relative = path.relative_to(ROOT).as_posix()
-    if file_hash(path) != stats["sha256"]:
-        raise ValueError("Source changed since preflight")
-    file_id = connection.execute("""
-        INSERT raw.IngestionFiles
-        (TargetTable,SourcePath,FileSHA256,FileBytes,SourceRows,BlankRows,LoadedRows,
-         RoundedCells,DatePeriodMismatches,HeaderJSON,LoaderVersion)
-        OUTPUT inserted.IngestionFileID
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, target, relative, stats["sha256"], path.stat().st_size, stats["source_rows"],
-        stats["blank_rows"], stats["loaded_rows"], stats["rounded_cells"],
-        stats["date_period_mismatches"], json.dumps(stats["headers"], ensure_ascii=False), VERSION
-    ).fetchval()
-    columns = list(COLUMNS[target]) + ["IngestionFileID", "SourceRowNumber", "SourceExtraJson"]
-    sql = f"INSERT raw.[{target}] ({','.join('[' + c + ']' for c in columns)}) VALUES ({','.join('?' for _ in columns)})"
-    cursor = connection.cursor()
-    cursor.fast_executemany = True
-    batch = []
-    observed = {}
-
-    def flush():
-        # Explicit buffer sizes avoid first-row NULL/short-text inference problems.
-        json_size = max(1, max(len((r[-1] or "").encode("utf-16-le")) // 2 for r in batch))
-        cursor.setinputsizes(input_sizes(target) + [(pyodbc.SQL_WVARCHAR, json_size, 0)])
-        cursor.executemany(sql, batch)
-        batch.clear()
-
-    for number, values, extras in read_rows(path, target, observed):
-        batch.append(values + (file_id, number, extras))
-        if len(batch) == batch_size:
-            flush()
-    if batch:
-        flush()
-    cursor.close()
-    inserted = connection.execute(
-        f"SELECT COUNT_BIG(*) FROM raw.[{target}] WHERE IngestionFileID=?", file_id
-    ).fetchval()
-    if inserted != stats["loaded_rows"] or any(observed[k] != stats[k] for k in observed):
-        raise RuntimeError("CSV count or contents changed during load")
-    if file_hash(path) != stats["sha256"]:
-        raise RuntimeError("Source changed during load")
-    connection.commit()
-    return inserted
-
-
-def run(args, report):
-    files = discover(ROOT)
-    logging.info("Discovered %s source files", len(files))
-    validated = []
-    for target, path in files:
-        entry = {"target": target, "file": path.name}
-        report["files"].append(entry)
-        try:
-            entry.update(inspect_file(path, target))
-            entry["status"] = "validated"
-            validated.append((target, path, entry))
-            logging.info("Validated %s: %s data rows, %s blank records", path.name,
-                         entry["loaded_rows"], entry["blank_rows"])
-            if entry["date_period_mismatches"]:
-                logging.warning("%s: %s dates disagree with filename; retained as supplied",
-                                path.name, entry["date_period_mismatches"])
-        except Exception as error:
-            entry.update(status="validation_failed", error=str(error))
-            logging.error("Validation failed for %s: %s", path.name, error)
-    if any(f["status"] == "validation_failed" for f in report["files"]):
-        raise RuntimeError("Preflight failed; no database changes were made. See report.")
-    if not args.load:
-        return
-    with closing(connect()) as connection:
-        connection.timeout = 120
-        acquire_lock(connection)
-        check_schema(connection)
-        prepare_tracking(connection)
-        reconcile(connection)
-        # Check every path before beginning any file load.
-        for target, path, stats in validated:
-            if already_loaded(connection, target, path.relative_to(ROOT).as_posix(), stats["sha256"]):
-                stats["status"] = "skipped_already_loaded"
-        connection.commit()
-        for target, path, stats in validated:
-            if stats["status"] == "skipped_already_loaded":
-                logging.info("Skipped previously loaded file: %s", path.name)
-                continue
+def read_file(path, table):
+    """Read one file and return rows in the same order as the SQL columns."""
+    rows = []
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file, strict=True)
+        if not reader.fieldnames:
+            raise ValueError(f"{path.name}: missing headers")
+        reader.fieldnames = [header.strip() for header in reader.fieldnames]
+        mapping = MAPPINGS[table]
+        mapped_headers = [mapping[h] for h in reader.fieldnames if h in mapping]
+        if len(reader.fieldnames) != len(set(reader.fieldnames)) or len(mapped_headers) != len(set(mapped_headers)):
+            raise ValueError(f"{path.name}: duplicate column mapping")
+        # Only the known 2023 Q1 layout lacks HijriDate and uses month/day/year.
+        special_date = table == "MOJ_Sales" and path.name == "MOJ-Sales-2023-Q1.csv"
+        date_format = "%m/%d/%Y" if special_date else "%Y/%m/%d"
+        required = set(COLUMNS[table]) - ({"HijriDate"} if special_date else set())
+        if not required.issubset(mapped_headers):
+            raise ValueError(f"{path.name}: missing expected columns")
+        for record_number, source_row in enumerate(reader, start=2):
             try:
-                # Recheck to handle duplicate content within the current discovery set.
-                if already_loaded(connection, target, path.relative_to(ROOT).as_posix(), stats["sha256"]):
-                    stats["status"] = "skipped_already_loaded"
-                    continue
-                inserted = insert_file(connection, target, path, stats, args.batch_size)
-                stats.update(status="loaded", inserted_rows=inserted)
-                logging.info("Loaded %s: %s rows committed", path.name, inserted)
-            except Exception as error:
-                connection.rollback()
-                stats.update(status="load_failed", error=str(error))
-                raise
-        reconcile(connection)
-        report["database_counts"] = {
-            target: connection.execute(f"SELECT COUNT_BIG(*) FROM raw.[{target}]").fetchval()
-            for target in COLUMNS
-        }
+                if None in source_row or None in source_row.values():
+                    raise ValueError("row has the wrong number of fields")
+                if not any(value.strip() for value in source_row.values()):
+                    continue  # Ignore completely empty records.
+                row = dict.fromkeys(COLUMNS[table])
+                for header, value in source_row.items():
+                    if header in mapping:
+                        column = mapping[header]
+                        row[column] = convert_value(column, value, date_format)
+                rows.append(tuple(row[column] for column in COLUMNS[table]))
+            except (ValueError, ArithmeticError) as error:
+                raise ValueError(f"{path.name}, record {record_number}: {error}") from error
+    return rows
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--load", action="store_true", help="Commit validated files to SQL Server")
-    parser.add_argument("--batch-size", type=int, default=2000)
-    args = parser.parse_args()
-    if not 1 <= args.batch_size <= 10000:
-        parser.error("--batch-size must be between 1 and 10000")
-    logs = ROOT / "logs"
-    logs.mkdir(exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-                        handlers=[logging.StreamHandler(), logging.FileHandler(logs / f"ingestion-{stamp}.log", encoding="utf-8")])
-    report = {"started_utc": stamp, "mode": "load" if args.load else "validate", "files": []}
-    code = 0
+    parser.add_argument("--load", action="store_true", help="Insert into empty SQL raw tables")
+    load = parser.parse_args().load
+    connection = None
     try:
-        run(args, report)
-        report["status"] = "success"
-    except Exception as error:
-        report.update(status="failed", error=str(error))
-        logging.error("Ingestion stopped: %s", error)
-        code = 1
+        if load:
+            connection = pyodbc.connect(
+                "DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost;"
+                "DATABASE=SaudiRealEstateAnalytics;Trusted_Connection=yes;"
+                "Encrypt=yes;TrustServerCertificate=yes;",  # Local development server.
+                timeout=10,
+            )
+            connection.timeout = 60
+            cursor = connection.cursor()
+            # This is a one-time loader, not an incremental loading system.
+            for table in FOLDERS:
+                if cursor.execute(f"SELECT TOP (1) 1 FROM raw.[{table}]").fetchone():
+                    print(f"raw.{table} already contains data. Nothing was inserted.")
+                    return
+
+        for table, folder in FOLDERS.items():
+            files = sorted((RAW_FOLDER / folder).glob("*.csv"))
+            if not files:
+                raise ValueError(f"No CSV files found in {folder}")
+            total = 0
+            for path in files:
+                rows = read_file(path, table)
+                # 4. Insert using parameters: each ? receives one column value.
+                if load and rows:
+                    columns = ", ".join(f"[{column}]" for column in COLUMNS[table])
+                    placeholders = ", ".join("?" for column in COLUMNS[table])
+                    sql = f"INSERT INTO raw.[{table}] ({columns}) VALUES ({placeholders})"
+                    cursor.executemany(sql, rows)
+                    connection.commit()  # Save this file only after every row succeeds.
+                # 5. Report the count for each file and the whole table.
+                action = "Inserted" if load else "Read"
+                print(f"{action} {len(rows):,} rows: {path.name}", flush=True)
+                total += len(rows)
+            print(f"{table}: {len(files)} files, {total:,} rows\n")
     finally:
-        report_path = logs / f"ingestion-{stamp}.json"
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        logging.info("Report: %s", report_path.name)
-    return code
+        if connection is not None:
+            connection.rollback()  # Undo the current file if it failed before commit.
+            connection.close()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

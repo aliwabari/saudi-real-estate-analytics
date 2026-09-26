@@ -1,3 +1,4 @@
+-- Historical: used by the earlier loader; not required by the simplified loader.
 USE SaudiRealEstateAnalytics;
 GO
 -- Committed files and counts, including empty records and source warnings.

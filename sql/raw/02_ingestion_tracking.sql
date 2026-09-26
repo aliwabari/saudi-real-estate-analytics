@@ -1,3 +1,4 @@
+-- Historical: used by the earlier loader; not required by the simplified loader.
 -- Ingestion metadata only. Existing business columns and data are retained.
 -- Run in SaudiRealEstateAnalytics. The Python loader runs this automatically.
 SET XACT_ABORT ON;

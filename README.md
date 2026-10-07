@@ -77,6 +77,22 @@ The final Power BI report contains four pages:
 
 See [powerbi/README.md](powerbi/README.md).
 
+## Dashboard preview
+
+### Executive / Market Overview
+![Executive Overview](assets/screenshots/executive-overview-green.webp)
+
+### Sales Market Analysis
+![Sales Market Analysis](assets/screenshots/sales-analysis-green.webp)
+
+### Geographic Analysis
+![Geographic Analysis](assets/screenshots/geographic-analysis-green.webp)
+
+### Rental Market Analysis
+![Rental Market Analysis](assets/screenshots/rental-market-analysis-green.webp)
+
+These screenshots show the final green-themed Power BI report used in the portfolio version of the project.
+
 ## Selected analytical findings
 
 - Riyadh, Makkah, and the Eastern Province together account for **67.6%** of imported sale transactions.
@@ -89,6 +105,8 @@ These findings describe the imported datasets and should not be interpreted as o
 
 ```text
 .
+├── assets/
+│   └── screenshots/
 ├── docs/
 ├── powerbi/
 ├── sql/

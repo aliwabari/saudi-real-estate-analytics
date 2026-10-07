@@ -1,18 +1,19 @@
 # Source inventory
 
-Inspected on 2026-09-25. Inventory and first-line header inspection only; row counts, value types, actual date coverage, and key uniqueness have not been validated.
+This document summarizes the source files used in the completed project and the structural differences identified during ingestion and profiling.
 
-## Existing folders
+## Sources
 
-| Folder under data/raw | CSV files | Bytes |
-|---|---:|---:|
-| MOJ Real Estate Sales Transactions (2020–2026 Q1) | 23 | 169,379,863 |
-| REGA Rental Market Indicators (2019–2024) | 12 | 1,304,409 |
-| MOJ Historical Real Estate Indices (2018–2021) | 3 | 264,150 |
+| Dataset | Local CSV files | Raw rows loaded | Analytical grain |
+|---|---:|---:|---|
+| MOJ real estate sales | 23 | 1,269,500 | One sale transaction |
+| REGA rental indicators | 12 | 17,792 | Year + Quarter + City + Property Type |
 
-## Sales
+Raw datasets are kept locally and excluded from Git.
 
-Files follow `MOJ-Sales-YYYY-QN.csv`.
+## MOJ sales
+
+Files follow the pattern `MOJ-Sales-YYYY-QN.csv`.
 
 | Year | Quarters present by filename |
 |---|---|
@@ -24,22 +25,29 @@ Files follow `MOJ-Sales-YYYY-QN.csv`.
 | 2025 | Q1, Q2, Q3, Q4 |
 | 2026 | Q1 |
 
-2020 Q4 and 2021 Q1 are absent by filename. Their transaction coverage has not been checked.
+Important structural differences:
 
-Twenty files share the expected ten-column Arabic header. 2023 Q2 and Q3 add property type. 2023 Q1 has 13 columns, including plan, plot number, property type, price per square metre, and a generic date column instead of separately labeled Gregorian and Hijri dates.
+- most files use the expected ten-column Arabic layout;
+- 2023 Q2 and Q3 include an additional property-type field;
+- 2023 Q1 has a different layout, uses a generic date field, and has no separate Hijri date;
+- the 2025 Q2 file contains Gregorian dates in April–June 2024, so the source dates were preserved rather than replaced using the filename.
 
-Before ingestion, agree how to preserve extra source fields and interpret the 2023 Q1 date. No raw-table implementation has been created.
+## REGA rentals
 
-## Rentals
+The rental files contain year, quarter, region, city, property type, total deals, and average value.
 
-Regional filenames identify Al-Baha, Al-jawf, Eastern-Province, Hail, Jazan, Madinah, Makkah, N-B, Najran, Qassim, Riyadh, and Tabuk. No Asir-named file was found.
+Important structural differences:
 
-Eastern-Province and Madinah use English headers: `year,quarter,region_ar,city_ar,Category,total_deals,average`. Other files use Arabic headers; Al-Baha, Makkah, and Riyadh include trailing spaces in some headers.
+- Eastern Province and Madinah use English headers;
+- other files primarily use Arabic headers;
+- some source headers contain trailing spaces;
+- the final uniqueness grain is **Year + Quarter + City + Property Type**.
 
-## Historical indices
+## Modeling consequence
 
-- `MOJ-RE-Index-Cities-2018-2021.csv`
-- `MOJ-RE-Index-Districts-2018-2021.csv`
-- `MOJ-RE-Index-Regions-2018-2021.csv`
+The sources do not represent the same business event:
 
-Headers contain title text, Unnamed columns, or repeated years. These files require separate structural inspection. Their target tables and ingestion approach are not yet agreed.
+- MOJ sales are transaction-level records.
+- REGA rentals are aggregated market indicators.
+
+They therefore remain separate fact tables and share geography dimensions where appropriate.

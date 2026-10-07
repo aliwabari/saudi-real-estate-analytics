@@ -1,68 +1,162 @@
 # Saudi Real Estate Analytics
 
-A Peak portfolio project to build an end-to-end analysis of Saudi real estate sales and rentals using SQL Server, Python, Power BI, and GitHub.
+End-to-end portfolio project for analyzing Saudi Arabia's real estate **sales and rental markets** using official public datasets.
 
-## Current status
+**Pipeline:** Raw Data → Python → SQL Server → Power BI
 
-Raw ingestion is implemented. All 23 MOJ sales files (1,269,500 rows) and 12 REGA rental files (17,792 rows) were loaded locally into SQL Server by the earlier loader. The current ingestion script uses pandas in one readable file for reading CSVs, mapping columns, converting values, inserting rows, and printing counts. It stops if either destination table already contains data. Core normalization, analysis, and dashboards remain future steps. See [the ingestion guide](docs/ingestion.md) for commands, conversion rules, and known data issues.
+## Project overview
 
-## Planned data flow
+This project combines Ministry of Justice (MOJ) sale transactions with Real Estate General Authority (REGA) rental indicators, then turns the raw files into a structured analytical model and an interactive Power BI report.
 
-CSV files → Python ingestion → SQL Server raw schema → SQL cleaning and normalization → core relational model → analytical/star model → Power BI.
+| Area | Scope |
+|---|---|
+| Sales source | MOJ real estate sale transactions |
+| Rental source | REGA rental market indicators |
+| Raw sales loaded | 1,269,500 rows |
+| Final sales fact | 1,222,289 transactions |
+| Rental indicators | 17,792 rows |
+| Main tools | Python, pandas, SQL Server, Power BI, DAX, Power Query |
+| Final report | 4 analytical pages |
 
-Python discovers source files, maps their columns, converts dates and numbers, inserts rows into raw tables, and prints row counts. Heavy analytical cleaning belongs after raw ingestion.
+## Business questions
 
-## Sources and grain
+- How is transaction activity changing over time?
+- Which regions, cities, and neighborhoods drive the market?
+- How do average and median sale prices differ?
+- Which property classifications dominate sales?
+- How does rental activity differ by property type and city?
+- Are averages being distorted by unusually expensive transactions?
 
-| Source | Grain | Local files |
-|---|---|---:|
-| MOJ real estate sales | One individual sale transaction | 23 |
-| REGA rental indicators | Year + Quarter + Region + City + PropertyType | 12 |
-| MOJ historical real estate indices | To be examined separately | 3 |
+## End-to-end workflow
 
-Sales and rentals have different grains and will not share one fact table. TransactionReference is not assumed to be a primary key; uniqueness must be tested.
+### 1. Data ingestion — Python
 
-Raw datasets are kept locally and excluded from Git. Cloning this repository will not download them. Existing source files must not be renamed, moved, overwritten, or deleted without approval.
+Python and pandas are used to discover the source files, standardize headers, convert dates and numeric fields, preserve Arabic text, and load the raw datasets into SQL Server.
 
-## Database decisions
+See [src/ingestion/load_raw.py](src/ingestion/load_raw.py) and [docs/ingestion.md](docs/ingestion.md).
 
-Database: `SaudiRealEstateAnalytics`.
+### 2. Data profiling and quality checks — SQL
 
-- `raw`: source/staging representation imported from CSV files.
-- `core`: normalized relational model.
+The raw layer was profiled before building the final model. Important findings included:
 
-Confirmed geography design:
+- duplicate `TransactionReference` values in MOJ sales;
+- inconsistent Arabic region spellings;
+- zero or missing area values in otherwise valid transactions;
+- mostly missing/zero Hijri dates;
+- extreme price outliers, including repeated Riyadh / Al-Aqiq records;
+- a rental duplicate key that required **City** in the analytical grain.
 
-- Region: RegionID (PK), RegionName.
-- City: CityID (PK), CityName, RegionID (FK).
-- Neighborhood: NeighborhoodID (PK), NeighborhoodName, CityID (FK).
+Duplicate-sale handling uses `ROW_NUMBER()` so only one row per transaction reference proceeds to the final model.
 
-Region has many cities; each city belongs to one region. City has many neighborhoods; each neighborhood belongs to one city. The remainder of the ERD is not finalized.
+See [sql/profiling/01_profile_raw_data.sql](sql/profiling/01_profile_raw_data.sql) and [docs/data-quality.md](docs/data-quality.md).
 
-## SQL files
+### 3. Relational model — SQL Server
 
-Run these in order only when setting up a new database:
+The cleaned relational layer separates reusable dimensions from sale and rental facts.
 
-1. `sql/00_create_database.sql`: create the database and the raw/core schemas if missing.
-2. `sql/raw/01_create_raw_tables.sql`: create the two raw tables if missing.
-3. `sql/raw/DisplayRawtables.sql`: view 10 sample rows and the total count for each table.
+**Core tables**
 
-The files include short Arabic explanations. The current database is already populated. Simplifying these files did not remove existing data or the earlier tracking columns/table from SQL Server. No core tables have been designed or implemented here.
+- `core.Region`
+- `core.City`
+- `core.Neighborhood`
+- `core.SalePropertyClassification`
+- `core.RentalPropertyType`
+- `core.SaleTransaction`
+- `core.RentalIndicator`
 
-## Project structure
+Sales and rentals intentionally remain separate facts because they have different grains.
+
+See [docs/data-model.md](docs/data-model.md) and [sql/core/02_create_core_tables.sql](sql/core/02_create_core_tables.sql).
+
+### 4. Analytical layer — SQL views
+
+Reusable views flatten the relational model for reporting:
+
+- `analytics.vw_SalesAnalysis`
+- `analytics.vw_RentalAnalysis`
+
+See [sql/analytics/03_create_analysis_views.sql](sql/analytics/03_create_analysis_views.sql).
+
+### 5. Reporting — Power BI
+
+The final Power BI report contains four pages:
+
+1. **Executive / Market Overview** — KPIs and market trend.
+2. **Sales Market Analysis** — transactions, prices, classifications, and outliers.
+3. **Geographic Analysis** — region, city, and neighborhood comparisons.
+4. **Rental Market Analysis** — quarterly activity, average rental values, and property types.
+
+The report uses a star-style semantic model, DAX measures, Power Query transformations, date filtering, and drill-down geographic analysis.
+
+See [powerbi/README.md](powerbi/README.md).
+
+## Selected analytical findings
+
+- Riyadh, Makkah, and the Eastern Province together account for **67.6%** of imported sale transactions.
+- The typical sale price is better represented by the **SAR 370K median** than by the mean because the distribution contains large outliers.
+- Apartments represent **73.3%** of recorded rental deals in the analyzed rental indicators.
+
+These findings are descriptive of the imported datasets and should not be interpreted as official market forecasts.
+
+## Repository structure
 
 ```text
-data/raw/              Existing local datasets; excluded from Git
-src/ingestion/         Simple loader and learning scripts
-src/transformation/    Reserved for later Python transformations if needed
-sql/raw/               Raw table definitions and simple display/count queries
-sql/core/              Future agreed relational model and normalization
-notebooks/             Future exploration and profiling
-powerbi/               Future Power BI report/project files
-docs/                  Source inventory and technical decisions
-requirements.txt       Pinned pandas, NumPy, and pyodbc dependencies
+.
+├── docs/
+│   ├── data-model.md
+│   ├── data-quality.md
+│   ├── ingestion.md
+│   ├── ingestion-validation.md
+│   └── source-inventory.md
+├── powerbi/
+│   └── README.md
+├── sql/
+│   ├── 00_create_database.sql
+│   ├── profiling/
+│   │   └── 01_profile_raw_data.sql
+│   ├── raw/
+│   │   ├── 01_create_raw_tables.sql
+│   │   └── DisplayRawtables.sql
+│   ├── core/
+│   │   └── 02_create_core_tables.sql
+│   └── analytics/
+│       └── 03_create_analysis_views.sql
+├── src/
+│   └── ingestion/
+│       ├── load_raw.py
+│       └── preview_sales.py
+├── .gitignore
+└── requirements.txt
 ```
 
-Empty development folders use `.gitkeep` placeholders because Git tracks files rather than empty directories. Python uses a local `.venv` and the dependencies declared in `requirements.txt`; environments, raw datasets, and ingestion logs are excluded from Git.
+Raw source datasets are intentionally excluded from Git.
 
-See [the source inventory](docs/source-inventory.md) for observed coverage and header differences. Work proceeds one major step at a time, with database designs proposed and reviewed before implementation.
+## Setup
+
+1. Create the database with `sql/00_create_database.sql`.
+2. Create the raw tables with `sql/raw/01_create_raw_tables.sql`.
+3. Install Python dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+4. Load the raw CSV files:
+
+```powershell
+python .\src\ingestion\load_raw.py --load
+```
+
+5. Run the profiling, core-model, and analytical-view SQL scripts in sequence.
+6. Connect Power BI to the analytical layer.
+
+## Portfolio
+
+A formatted case-study version of this work is included in my data analytics portfolio:
+
+**Portfolio:** https://heyzine.com/flip-book/a90b80ff5f.html
+
+---
+
+**Ali Alwabari**  
+Computer Information Systems | Data Analytics | SQL | Python | Power BI
